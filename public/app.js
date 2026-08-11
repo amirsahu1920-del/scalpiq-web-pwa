@@ -9,6 +9,7 @@ const engine = new TradingEngine((state) => {
 });
 ui = new AppUI(engine);
 ui.render(engine.snapshot());
+engine.bootstrap().catch((e) => console.error('ScalpIQ restore failed', e));
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));

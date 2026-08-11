@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#06100c">
+  <meta name="description" content="ScalpIQ Binance Futures paper auto-scalper PWA">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/styles.css">
+  <title>ScalpIQ • Paper Auto Scalper</title>
+</head>
+<body>
+  <button id="installBtn" class="hidden">INSTALL DESKTOP APP</button>
+  <div class="shell"><main id="main"></main></div>
+  <nav class="bottom-nav" aria-label="Main navigation">
+    <button class="nav-btn active" data-tab="auto">AUTO</button>
+    <button class="nav-btn" data-tab="trades">TRADES</button>
+    <button class="nav-btn" data-tab="api">API</button>
+  </nav>
+  <noscript>This app requires JavaScript.</noscript>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

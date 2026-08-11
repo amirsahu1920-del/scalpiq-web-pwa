@@ -1,0 +1,11 @@
+{
+  "name": "scalpiq-web-pwa",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check public/app.js && node --check public/sw.js && node --check public/js/config.js && node --check public/js/engine.js && node --check public/js/strategy.js && node --check public/js/api.js && node --check public/js/indicators.js && node --check public/js/store.js && node --check public/js/ui.js && node --check functions/api/binance/[[path]].js",
+    "dev": "npx wrangler pages dev public"
+  }
+}

@@ -1,0 +1,91 @@
+SCALPIQ WEB/PWA — EASY A TO Z GUIDE
+====================================
+
+PART 1 — ZIP EXTRACT
+1. Download ScalpIQ-Web-PWA-Cloudflare.zip.
+2. Windows PC par ZIP par Right Click > Extract All.
+3. Extract hone ke baad folder kholen.
+4. Is folder ke andar public, functions, tests, package.json, README.md nazar aayenge.
+
+PART 2 — GITHUB REPOSITORY
+1. Browser mein github.com login karein.
+2. Top-right + par click karein > New repository.
+3. Repository name: scalpiq-web-pwa
+4. Visibility: Private rakh sakte hain.
+5. Create repository click karein.
+6. Repository page par Add file > Upload files.
+7. Extracted ScalpIQ folder ke ANDAR ka sara content select/drag karein.
+   IMPORTANT: public aur functions folder repository ke root par hi hone chahiye.
+8. Neeche Commit changes par click karein.
+9. Repository main branch mein files check karein.
+
+PART 3 — CLOUDFLARE ACCOUNT/PAGES
+1. dash.cloudflare.com par free account login/create karein.
+2. Left menu se Workers & Pages kholen.
+3. Create application > Pages > Connect to Git.
+4. GitHub select/authorize karein.
+5. scalpiq-web-pwa repository select karein.
+6. Build settings:
+   Project name: scalpiq-web-pwa
+   Production branch: main
+   Framework preset: None
+   Build command: exit 0
+   Build output directory: public
+   Root directory: BLANK
+7. Save and Deploy click karein.
+8. Deployment complete hone par Cloudflare URL dega:
+   https://scalpiq-web-pwa.pages.dev  (exact name availability par depend karega)
+9. URL open karein. ScalpIQ dashboard load hona chahiye.
+
+PART 4 — FIRST WORKING TEST
+1. Website open karein.
+2. Virtual Balance mein 1000 enter karein.
+3. START FULL AUTO click karein.
+4. Status mein Binance connected / live data aana chahiye.
+5. AUTO RESEARCH cards appear honge.
+6. Suitable signal milne par paper position open hogi.
+7. TRADES tab mein closed trades aur exact evidence timestamps save honge.
+8. Refresh ke baad closed trade history browser local storage se wapas aayegi.
+
+PART 5 — WINDOWS PC PAR APP KI TARAH INSTALL
+1. ScalpIQ Pages URL Google Chrome mein open karein.
+2. Address bar mein Install icon aaye to click karein.
+   Ya Chrome top-right 3 dots > Cast, save, and share > Install page as app...
+3. Name ScalpIQ rehne dein > Install.
+4. Ab ScalpIQ Windows mein separate app-window ki tarah open hoga.
+5. Taskbar par icon par Right Click > Pin to taskbar kar sakte hain.
+
+PART 6 — PC KO RUNNING RAKHNA
+1. ScalpIQ app window open rakhein.
+2. PC ko sleep/shutdown na hone dein jab bot run karna ho.
+3. Internet connection active rehna chahiye.
+4. Browser/PWA close ho gaya to browser trading engine stop ho jayega.
+
+PART 7 — FUTURE CODE UPDATE
+1. GitHub repo mein jis file ko update karna ho edit/upload karein.
+2. Commit changes karein.
+3. Cloudflare Git integration automatic new deployment karegi.
+4. PWA ko next open/refresh par new files mil jayengi.
+
+COMMON ERROR CHECK
+A) Cloudflare 404:
+   - Build output directory exactly public ho.
+   - public/index.html repository mein ho.
+
+B) API calls fail:
+   - functions/api/binance/[[path]].js exact folder structure check karein.
+   - public/_routes.json present ho.
+   - Cloudflare deployment Functions ko detect kare.
+
+C) Install button na aaye:
+   - pages.dev HTTPS URL use karein.
+   - Chrome latest version use karein.
+   - Chrome menu > Cast, save, and share > Install page as app try karein.
+
+D) Bot background mein ruk jaye:
+   - PC sleep off karein aur ScalpIQ app window open rakhein.
+
+SECURITY
+- Ye paper-trading build real orders place nahi karta.
+- Binance API key paper mode ke liye required nahi hai.
+- API tab ke draft fields sirf current browser session mein rakhe jaate hain; persistent live-trading secrets ke liye use na karein.

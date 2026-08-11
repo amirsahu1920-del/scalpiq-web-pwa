@@ -1,0 +1,3 @@
+ScalpIQ Web/PWA 1.0.0
+Base: latest ScalpIQ paper engine with Strict Liquidity OFF, Multi-Confirm OFF, fixed 2x leverage, Shadow A/B, TP1-only, 2-loss/3-min cooldown, PF guard, and 2% drawdown/15-min auto-resume.
+Deployment target: Cloudflare Pages + Pages Functions fallback proxy + Windows Chrome PWA.

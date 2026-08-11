@@ -148,5 +148,6 @@ export function createPosition(signal, book, equity, mode) {
     initialStop: stop, stopPrice: stop, tp1, quantity: notional / entry, notional,
     virtualLeverage: CONFIG.VIRTUAL_LEVERAGE, feeRate: CONFIG.PAPER_TAKER_FEE_RATE,
     slippageRate: dynamicSlip, analyzedSide: signal.side, executionMode: mode, lastPrice: entry,
+    lastObservedAt: Date.now(),
   };
 }

@@ -66,12 +66,36 @@ export class BinanceMarketClient {
     })).filter((x) => x.symbol && Number.isFinite(x.lastPrice));
   }
 
-  async klines(symbol, interval = '1m', limit = 120) {
-    const arr = await this.get('/fapi/v1/klines', { symbol, interval, limit });
+  mapKlines(arr) {
     return (Array.isArray(arr) ? arr : []).map((k) => ({
       openTime: Number(k[0]), open: Number(k[1]), high: Number(k[2]), low: Number(k[3]),
       close: Number(k[4]), volume: Number(k[5]), closeTime: Number(k[6]),
     }));
+  }
+
+  async klines(symbol, interval = '1m', limit = 120) {
+    return this.mapKlines(await this.get('/fapi/v1/klines', { symbol, interval, limit }));
+  }
+
+  // Used only when restoring an interrupted paper session. Binance allows up to
+  // 1500 candles per call, so long outages are paged without inventing missing prices.
+  async klinesRange(symbol, interval = '1m', startTime, endTime = Date.now(), maxPages = 60) {
+    let cursor = Math.max(0, Number(startTime || 0));
+    const end = Math.max(cursor, Number(endTime || Date.now()));
+    const out = [];
+    for (let page = 0; page < maxPages && cursor <= end; page += 1) {
+      const rows = this.mapKlines(await this.get('/fapi/v1/klines', {
+        symbol, interval, startTime: cursor, endTime: end, limit: 1500,
+      }));
+      if (!rows.length) break;
+      for (const row of rows) {
+        if (!out.length || row.openTime > out[out.length - 1].openTime) out.push(row);
+      }
+      const next = Number(rows[rows.length - 1].closeTime || 0) + 1;
+      if (!(next > cursor) || rows.length < 1500 || next > end) break;
+      cursor = next;
+    }
+    return out;
   }
 
   async depth(symbol, limit = 20) {

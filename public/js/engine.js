@@ -1,7 +1,7 @@
 import { CONFIG, SIDE, MODE } from './config.js';
 import { BinanceMarketClient } from './api.js';
 import { analyze, createPosition, bookFromDepth } from './strategy.js';
-import { SessionStore, TradeStore } from './store.js';
+import { TradeStore } from './store.js';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const money = (v) => `$${Number(v).toFixed(2)}`;
@@ -22,25 +22,11 @@ export class TradingEngine {
     this.shadowPositions = [];
     this.shadowOutcomes = [];
     this.lastPerformanceGuardTradeCount = 0;
-    this.autoEntriesEnabled = false;
     this.wakeLock = null;
-    this.persistTimer = null;
-    this.restoredSavedAt = 0;
-    this.hasRestoredSession = false;
-
-    this.restoreSavedSnapshot();
-
     this.pollTimer = setInterval(() => this.pollStalePositionFeeds(), 3_000);
-    this.persistHeartbeat = setInterval(() => {
-      if (this.state.sessionStartedAt) this.persistNow();
-    }, 3_000);
-
     document.addEventListener?.('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && (this.isSessionActive() || this.needsAnyFeed())) this.requestWakeLock();
-      if (document.visibilityState === 'hidden') this.persistNow();
+      if (document.visibilityState === 'visible' && this.isSessionActive()) this.requestWakeLock();
     });
-    window.addEventListener?.('pagehide', () => this.persistNow());
-    window.addEventListener?.('beforeunload', () => this.persistNow());
   }
 
   initialState() {
@@ -52,95 +38,14 @@ export class TradingEngine {
       executionMode: MODE.NORMAL, shadowNormalPf: 0, shadowInversePf: 0,
       shadowNormalSamples: 0, shadowInverseSamples: 0,
       performanceGuardText: 'Collecting live evidence', sessionStartedAt: null,
-      cooldownUntil: 0, apiTransport: '--', autoEntriesEnabled: false,
-      restoredFromDisk: false,
+      cooldownUntil: 0, apiTransport: '--',
     };
-  }
-
-  restoreSavedSnapshot() {
-    const saved = SessionStore.load();
-    if (!saved || saved.version !== 2 || !saved.state?.sessionStartedAt) return;
-
-    const storedTrades = TradeStore.load();
-    this.cooldownUntil = Number(saved.cooldownUntil || saved.state.cooldownUntil || 0);
-    this.executionMode = saved.executionMode === MODE.INVERSE ? MODE.INVERSE : MODE.NORMAL;
-    this.shadowPositions = Array.isArray(saved.shadowPositions) ? saved.shadowPositions : [];
-    this.shadowOutcomes = Array.isArray(saved.shadowOutcomes) ? saved.shadowOutcomes.slice(0, 80) : [];
-    this.lastPerformanceGuardTradeCount = Number(saved.lastPerformanceGuardTradeCount || 0);
-    this.autoEntriesEnabled = saved.autoEntriesEnabled !== false;
-    this.restoredSavedAt = Number(saved.savedAt || Date.now());
-    this.hasRestoredSession = true;
-
-    this.state = {
-      ...this.initialState(),
-      ...saved.state,
-      trades: storedTrades.length ? storedTrades : (Array.isArray(saved.state.trades) ? saved.state.trades : []),
-      feedConnected: false,
-      latencyMs: null,
-      apiTransport: '--',
-      executionMode: this.executionMode,
-      cooldownUntil: this.cooldownUntil,
-      autoEntriesEnabled: this.autoEntriesEnabled,
-      restoredFromDisk: true,
-      botStatus: this.autoEntriesEnabled ? 'CONNECTING' : 'STOPPED',
-      statusText: this.autoEntriesEnabled
-        ? 'Saved paper session restore ho rahi hai...'
-        : 'Saved session restored • new trades manually stopped',
-    };
-    this.state.unrealizedPnl = this.state.activePositions.reduce((s, p) => s + this.unrealized(p), 0);
-  }
-
-  persistPayload() {
-    const persistedState = {
-      ...this.state,
-      // Market connection fields are transient and are re-established on launch.
-      feedConnected: false,
-      latencyMs: null,
-      apiTransport: '--',
-      autoEntriesEnabled: this.autoEntriesEnabled,
-      cooldownUntil: this.cooldownUntil,
-      executionMode: this.executionMode,
-      // Closed trades already have their own dedicated store; avoid duplicating hundreds of records.
-      trades: undefined,
-    };
-    return {
-      version: 2,
-      savedAt: Date.now(),
-      autoEntriesEnabled: this.autoEntriesEnabled,
-      cooldownUntil: this.cooldownUntil,
-      executionMode: this.executionMode,
-      shadowPositions: this.shadowPositions.slice(0, 40),
-      shadowOutcomes: this.shadowOutcomes.slice(0, 80),
-      lastPerformanceGuardTradeCount: this.lastPerformanceGuardTradeCount,
-      state: persistedState,
-    };
-  }
-
-  persistNow() {
-    if (!this.state.sessionStartedAt) return;
-    if (this.persistTimer) { clearTimeout(this.persistTimer); this.persistTimer = null; }
-    TradeStore.save(this.state.trades);
-    SessionStore.save(this.persistPayload());
-  }
-
-  persistSoon() {
-    if (!this.state.sessionStartedAt || this.persistTimer) return;
-    this.persistTimer = setTimeout(() => {
-      this.persistTimer = null;
-      this.persistNow();
-    }, 700);
   }
 
   emit(patch = {}) {
-    Object.assign(this.state, patch, {
-      executionMode: this.executionMode,
-      cooldownUntil: this.cooldownUntil,
-      apiTransport: this.apiTransport,
-      autoEntriesEnabled: this.autoEntriesEnabled,
-    });
+    Object.assign(this.state, patch, { executionMode: this.executionMode, cooldownUntil: this.cooldownUntil, apiTransport: this.apiTransport });
     this.state.unrealizedPnl = this.state.activePositions.reduce((s, p) => s + this.unrealized(p), 0);
     this.onState(this.snapshot());
-    this.persistSoon();
   }
 
   snapshot() {
@@ -160,12 +65,7 @@ export class TradingEngine {
   }
 
   isSessionActive() {
-    return !!(this.autoEntriesEnabled && this.state.sessionStartedAt
-      && ['CONNECTING', 'SCANNING', 'RUNNING', 'COOLDOWN', 'ERROR'].includes(this.state.botStatus));
-  }
-
-  needsAnyFeed() {
-    return this.state.activePositions.length > 0 || this.shadowPositions.length > 0;
+    return this.state.sessionStartedAt && ['CONNECTING', 'SCANNING', 'RUNNING', 'COOLDOWN'].includes(this.state.botStatus);
   }
 
   async requestWakeLock() {
@@ -182,35 +82,6 @@ export class TradingEngine {
     this.wakeLock = null;
   }
 
-  // Called once by app.js after the UI exists. Restores active/shadow trades, reconciles
-  // the offline interval from Binance 1m candles, and resumes scanning if the user did not stop it.
-  async bootstrap() {
-    if (!this.hasRestoredSession) return;
-    this.log(`SESSION RESTORE • Saved ${new Date(this.restoredSavedAt).toLocaleString()} • balance ${money(this.state.realizedBalance)}`);
-    await this.reconcileDowntime();
-
-    const feedSymbols = new Set([
-      ...this.state.activePositions.map((p) => p.symbol),
-      ...this.shadowPositions.map((p) => p.symbol),
-    ]);
-    for (const symbol of feedSymbols) this.subscribePosition(symbol);
-
-    if (this.autoEntriesEnabled) {
-      const token = ++this.scanToken;
-      this.emit({ botStatus: 'CONNECTING', statusText: Date.now() < this.cooldownUntil
-        ? 'Saved session restored • cooldown continue ho raha hai'
-        : 'Saved session restored • Binance reconnecting...' });
-      this.requestWakeLock();
-      this.scanLoop(token);
-    } else {
-      this.emit({ botStatus: 'STOPPED', statusText: this.state.activePositions.length
-        ? 'New trades stopped • restored active positions protected hain'
-        : 'Saved session restored • new trades manually stopped' });
-      if (this.needsAnyFeed()) this.requestWakeLock(); else this.releaseWakeLock();
-    }
-    this.persistNow();
-  }
-
   start(virtualBalance) {
     const balance = Number(virtualBalance);
     if (!(balance > 0) || this.isSessionActive()) return;
@@ -221,47 +92,26 @@ export class TradingEngine {
     this.shadowPositions = [];
     this.shadowOutcomes = [];
     this.lastPerformanceGuardTradeCount = 0;
-    this.autoEntriesEnabled = true;
     this.symbols = new Set();
     for (const s of this.sockets.values()) s.close();
     this.sockets.clear();
     this.lastWsTick.clear();
-    SessionStore.clear();
     this.state = {
       ...this.initialState(),
       trades: TradeStore.load(), initialBalance: balance, realizedBalance: balance,
       botStatus: 'CONNECTING', statusText: 'Binance Futures live feed connect ho rahi hai...',
       sessionStartedAt: Date.now(), performanceGuardText: 'Collecting live evidence',
-      autoEntriesEnabled: true,
     };
     this.log(`SESSION START • Virtual balance ${money(balance)} • Shadow A/B starts NORMAL`);
-    this.persistNow();
-    this.requestWakeLock();
-    this.scanLoop(token);
-  }
-
-  resumeAuto() {
-    if (!this.state.sessionStartedAt || this.autoEntriesEnabled) return;
-    this.autoEntriesEnabled = true;
-    const token = ++this.scanToken;
-    this.emit({ botStatus: 'CONNECTING', statusText: Date.now() < this.cooldownUntil
-      ? 'Auto resumed • saved cooldown continue ho raha hai'
-      : 'Auto resumed • Binance reconnecting...' });
-    this.log('AUTO RESUME • New entries enabled by user');
-    this.persistNow();
     this.requestWakeLock();
     this.scanLoop(token);
   }
 
   stopNewTrades() {
-    this.autoEntriesEnabled = false;
     this.scanToken += 1;
-    this.emit({ botStatus: 'STOPPED', statusText: this.state.activePositions.length
-      ? 'New trades stopped • active positions abhi protected hain'
-      : 'Bot stopped • saved session retained' });
-    this.log('BOT STOP • New entries disabled • session saved');
-    this.persistNow();
-    if (!this.needsAnyFeed()) this.releaseWakeLock();
+    this.emit({ botStatus: 'STOPPED', statusText: this.state.activePositions.length ? 'New trades stopped • active positions abhi protected hain' : 'Bot stopped' });
+    this.log('BOT STOP • New entries disabled');
+    if (!this.state.activePositions.length) this.releaseWakeLock();
   }
 
   resetHistory() {
@@ -270,11 +120,10 @@ export class TradingEngine {
     this.shadowPositions = [];
     this.shadowOutcomes = [];
     this.emit({ trades: [], signals: [], logs: [], shadowNormalPf: 0, shadowInversePf: 0, shadowNormalSamples: 0, shadowInverseSamples: 0 });
-    this.persistNow();
   }
 
   async scanLoop(token) {
-    while (token === this.scanToken && this.autoEntriesEnabled) {
+    while (token === this.scanToken) {
       if (!this.symbols.size) {
         try {
           this.symbols = await this.market.tradingSymbols();
@@ -298,7 +147,7 @@ export class TradingEngine {
       try {
         this.emit({ botStatus: 'SCANNING', statusText: 'Market + regime + signal scan...' });
         await this.scanOnce(token);
-        if (token !== this.scanToken || !this.autoEntriesEnabled) return;
+        if (token !== this.scanToken) return;
         this.emit({ feedConnected: true, botStatus: 'RUNNING', statusText: `AUTO ${this.executionMode} • shadow A/B evidence active` });
         await delay(CONFIG.SCAN_INTERVAL_MS);
       } catch (e) {
@@ -381,7 +230,6 @@ export class TradingEngine {
   }
 
   async openPaperPosition(signal) {
-    if (!this.autoEntriesEnabled) return;
     if (this.state.activePositions.length >= CONFIG.MAX_OPEN_POSITIONS) return;
     if (this.state.activePositions.some((p) => p.symbol === signal.symbol)) return;
     if (Date.now() < this.cooldownUntil) return;
@@ -401,12 +249,11 @@ export class TradingEngine {
     this.state.activePositions = [...this.state.activePositions, position];
     this.emit();
     this.log(`SIGNAL ${signal.side} → OPEN ${position.side} ${position.symbol} • MODE ${this.executionMode} • ${money(position.notional)} • ${position.confidence.toFixed(1)}% • SL ${this.fmtPrice(position.stopPrice)} • TP1 ${this.fmtPrice(position.tp1)}`);
-    this.persistNow();
     this.subscribePosition(position.symbol);
   }
 
   toShadow(p) {
-    return { ...p, id: `${p.id}-${p.executionMode}`, mode: p.executionMode, lastObservedAt: p.lastObservedAt || Date.now() };
+    return { ...p, id: `${p.id}-${p.executionMode}`, mode: p.executionMode };
   }
 
   subscribePosition(symbol) {
@@ -447,8 +294,7 @@ export class TradingEngine {
     }
     const old = this.state.activePositions[idx];
     const marketExit = this.exitPriceFor(old.side, book, old.slippageRate);
-    const observedAt = Number(book.eventTime || Date.now());
-    const p = { ...old, lastPrice: marketExit, lastObservedAt: observedAt };
+    const p = { ...old, lastPrice: marketExit };
     const tpReached = p.side === SIDE.LONG ? marketExit >= p.tp1 : marketExit <= p.tp1;
     const stopReached = p.side === SIDE.LONG ? marketExit <= p.stopPrice : marketExit >= p.stopPrice;
     if (tpReached) { this.closePosition(p, marketExit, 'TP1 target'); return; }
@@ -456,36 +302,29 @@ export class TradingEngine {
     const positions = [...this.state.activePositions];
     positions[idx] = p;
     this.state.activePositions = positions;
-    this.emit({ latencyMs: Math.max(0, Date.now() - observedAt) });
+    this.emit({ latencyMs: Math.max(0, Date.now() - (book.eventTime || Date.now())) });
   }
 
   updateShadowPositions(book) {
     const matching = this.shadowPositions.filter((p) => p.symbol === book.symbol);
-    const now = Number(book.eventTime || Date.now());
+    const now = Date.now();
     for (const shadow of matching) {
       const exit = this.exitPriceFor(shadow.side, book, shadow.slippageRate);
-      shadow.lastPrice = exit;
-      shadow.lastObservedAt = now;
       const tpHit = shadow.side === SIDE.LONG ? exit >= shadow.tp1 : exit <= shadow.tp1;
       const slHit = shadow.side === SIDE.LONG ? exit <= shadow.stopPrice : exit >= shadow.stopPrice;
       const timedOut = now - shadow.entryTime >= CONFIG.SHADOW_TIMEOUT_MS;
-      if (tpHit || slHit || timedOut) this.closeShadow(shadow, exit, now);
+      if (tpHit || slHit || timedOut) {
+        const gross = this.signedPnl(shadow.side, shadow.entryPrice, exit, shadow.quantity);
+        const fees = shadow.notional * shadow.feeRate * 2;
+        this.shadowOutcomes.unshift({ mode: shadow.mode, netPnl: gross - fees, closedAt: now });
+        this.shadowOutcomes = this.shadowOutcomes.slice(0, 80);
+        this.shadowPositions = this.shadowPositions.filter((p) => p.id !== shadow.id);
+        this.refreshShadowStatsAndMode(false);
+      }
     }
-    this.persistSoon();
   }
 
-  closeShadow(shadow, exit, closedAt = Date.now()) {
-    if (!this.shadowPositions.some((p) => p.id === shadow.id)) return;
-    const gross = this.signedPnl(shadow.side, shadow.entryPrice, exit, shadow.quantity);
-    const fees = shadow.notional * shadow.feeRate * 2;
-    this.shadowOutcomes.unshift({ mode: shadow.mode, netPnl: gross - fees, closedAt });
-    this.shadowOutcomes = this.shadowOutcomes.slice(0, 80);
-    this.shadowPositions = this.shadowPositions.filter((p) => p.id !== shadow.id);
-    this.refreshShadowStatsAndMode(false, closedAt);
-    this.persistNow();
-  }
-
-  refreshShadowStatsAndMode(forceFallbackFlip = false, baseTime = Date.now()) {
+  refreshShadowStatsAndMode(forceFallbackFlip = false) {
     const normal = this.shadowOutcomes.filter((x) => x.mode === MODE.NORMAL).slice(0, 20);
     const inverse = this.shadowOutcomes.filter((x) => x.mode === MODE.INVERSE).slice(0, 20);
     const normalPf = this.profitFactor(normal.map((x) => x.netPnl));
@@ -506,115 +345,27 @@ export class TradingEngine {
     const guard = bothWeak ? 'Both shadow modes weak • extended cooldown on guard'
       : enough ? `Shadow-selected ${this.executionMode}`
         : `Shadow learning ${normal.length}/${CONFIG.MIN_SHADOW_SAMPLES_PER_MODE} N • ${inverse.length}/${CONFIG.MIN_SHADOW_SAMPLES_PER_MODE} I`;
-    if (bothWeak) this.cooldownUntil = Math.max(this.cooldownUntil, Number(baseTime) + CONFIG.PERFORMANCE_COOLDOWN_MS);
     this.emit({ shadowNormalPf: normalPf, shadowInversePf: inversePf, shadowNormalSamples: normal.length, shadowInverseSamples: inverse.length, performanceGuardText: guard });
     if (previous !== this.executionMode) this.log(`SHADOW SELECT • ${previous} → ${this.executionMode} • N PF ${normalPf.toFixed(2)} • I PF ${inversePf.toFixed(2)}`);
+    if (bothWeak) this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + CONFIG.PERFORMANCE_COOLDOWN_MS);
   }
 
-  // Reconstruct what happened while the PWA/PC was closed. If both TP and SL lie inside
-  // the same 1m candle, the conservative paper assumption is SL (never optimistic guessing).
-  historicalTrigger(position, candles, includeTimeout = false) {
-    const from = Number(position.lastObservedAt || position.entryTime || 0);
-    const timeoutAt = Number(position.entryTime || 0) + CONFIG.SHADOW_TIMEOUT_MS;
-    for (const c of candles) {
-      if (Number(c.closeTime) < from) continue;
-      const stopHit = position.side === SIDE.LONG ? c.low <= position.stopPrice : c.high >= position.stopPrice;
-      const tpHit = position.side === SIDE.LONG ? c.high >= position.tp1 : c.low <= position.tp1;
-      if (stopHit && tpHit) {
-        return { type: 'STOP', exitPrice: position.stopPrice, at: c.closeTime, reason: 'Initial stop • offline 1m ambiguous' };
-      }
-      if (stopHit) return { type: 'STOP', exitPrice: position.stopPrice, at: c.closeTime, reason: 'Initial stop • offline reconcile' };
-      if (tpHit) return { type: 'TP', exitPrice: position.tp1, at: c.closeTime, reason: 'TP1 target • offline reconcile' };
-      if (includeTimeout && timeoutAt <= c.closeTime) {
-        return { type: 'TIMEOUT', exitPrice: c.close, at: Math.max(timeoutAt, c.openTime), reason: 'Shadow timeout • offline reconcile' };
-      }
-    }
-    if (includeTimeout && timeoutAt <= Date.now()) {
-      const last = candles[candles.length - 1];
-      if (last) return { type: 'TIMEOUT', exitPrice: last.close, at: Math.max(timeoutAt, last.openTime), reason: 'Shadow timeout • offline reconcile' };
-    }
-    return null;
-  }
-
-  async reconcileDowntime() {
-    if (!this.needsAnyFeed()) return;
-    const now = Date.now();
-    const all = [...this.state.activePositions, ...this.shadowPositions];
-    const bySymbol = new Map();
-    for (const p of all) {
-      const list = bySymbol.get(p.symbol) || [];
-      list.push(p);
-      bySymbol.set(p.symbol, list);
-    }
-
-    const events = [];
-    const latestBooks = new Map();
-    for (const [symbol, positions] of bySymbol.entries()) {
-      try {
-        const earliest = Math.min(...positions.map((p) => Number(p.lastObservedAt || p.entryTime || this.restoredSavedAt || now)));
-        // Include the previous candle so a close near the shutdown boundary is not missed.
-        const start = Math.max(0, earliest - 60_000);
-        const candles = await this.market.klinesRange(symbol, '1m', start, now);
-        for (const p of this.state.activePositions.filter((x) => x.symbol === symbol)) {
-          const hit = this.historicalTrigger(p, candles, false);
-          if (hit) events.push({ kind: 'ACTIVE', p, ...hit });
-        }
-        for (const p of this.shadowPositions.filter((x) => x.symbol === symbol)) {
-          const hit = this.historicalTrigger(p, candles, true);
-          if (hit) events.push({ kind: 'SHADOW', p, ...hit });
-        }
-        const depth = await this.market.depth(symbol, 5);
-        latestBooks.set(symbol, bookFromDepth(depth));
-      } catch (e) {
-        this.log(`RESTORE WARNING ${symbol} • ${e.message}`);
-      }
-    }
-
-    events.sort((a, b) => (a.at - b.at) || (a.kind === 'SHADOW' ? -1 : 1));
-    let activeClosed = 0;
-    let shadowClosed = 0;
-    for (const ev of events) {
-      if (ev.kind === 'SHADOW') {
-        const liveShadow = this.shadowPositions.find((x) => x.id === ev.p.id);
-        if (!liveShadow) continue;
-        this.closeShadow(liveShadow, ev.exitPrice, ev.at);
-        shadowClosed += 1;
-      } else {
-        const live = this.state.activePositions.find((x) => x.id === ev.p.id);
-        if (!live) continue;
-        this.closePosition(live, ev.exitPrice, ev.reason, ev.at);
-        activeClosed += 1;
-      }
-    }
-
-    // Surviving positions are marked to the current Binance book immediately.
-    for (const [symbol, book] of latestBooks.entries()) {
-      if (this.needsSymbolFeed(symbol)) this.onBookTick(book);
-    }
-
-    if (activeClosed || shadowClosed) this.log(`OFFLINE RECONCILE • ${activeClosed} active + ${shadowClosed} shadow outcomes restored`);
-    else this.log('OFFLINE RECONCILE • No missed TP/SL detected');
-    this.persistNow();
-  }
-
-  closePosition(p, exitPrice, reason, closedAt = Date.now()) {
-    if (!this.state.activePositions.some((x) => x.id === p.id)) return;
-    const exitTime = Number(closedAt || Date.now());
+  closePosition(p, exitPrice, reason) {
     const gross = this.signedPnl(p.side, p.entryPrice, exitPrice, p.quantity);
     const fees = p.notional * p.feeRate * 2;
     const slippageCost = p.notional * p.slippageRate * 2;
     const net = gross - fees;
     const closed = {
       id: p.id, symbol: p.symbol, side: p.side, strategy: p.strategy, confidence: p.confidence,
-      entryPrice: p.entryPrice, entryTime: p.entryTime, exitPrice, exitTime, stopPrice: p.stopPrice,
+      entryPrice: p.entryPrice, entryTime: p.entryTime, exitPrice, exitTime: Date.now(), stopPrice: p.stopPrice,
       tp1: p.tp1, notional: p.notional, quantity: p.quantity, virtualLeverage: p.virtualLeverage,
-      grossPnl: gross, fees, slippageCost, netPnl: net, durationMs: Math.max(0, exitTime - p.entryTime),
+      grossPnl: gross, fees, slippageCost, netPnl: net, durationMs: Date.now() - p.entryTime,
       exitReason: reason, entryEventTime: p.entryEventTime, entryTransactionTime: p.entryTransactionTime,
       entryUpdateId: p.entryUpdateId, analyzedSide: p.analyzedSide, executionMode: p.executionMode,
     };
     const remaining = this.state.activePositions.filter((x) => x.id !== p.id);
     const losses = net < 0 ? this.state.consecutiveLosses + 1 : 0;
-    const trades = [closed, ...this.state.trades].sort((a, b) => b.exitTime - a.exitTime).slice(0, 500);
+    const trades = [closed, ...this.state.trades].slice(0, 500);
     const newBalance = this.state.realizedBalance + net;
     this.state.activePositions = remaining;
     this.state.trades = trades;
@@ -625,30 +376,29 @@ export class TradingEngine {
     this.log(`CLOSE ${p.symbol} • ${p.executionMode} • ${signedMoney(net)} • ${reason}`);
 
     if (losses >= 2) {
-      this.refreshShadowStatsAndMode(true, exitTime);
-      this.cooldownUntil = Math.max(this.cooldownUntil, exitTime + CONFIG.LOSS_COOLDOWN_MS);
+      this.refreshShadowStatsAndMode(true);
+      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + CONFIG.LOSS_COOLDOWN_MS);
       this.state.consecutiveLosses = 0;
       this.log(`AUTO COOLDOWN • 2 consecutive losses • 3 minutes • next mode ${this.executionMode}`);
     }
-    this.applyPerformanceGuard(exitTime);
+    this.applyPerformanceGuard();
     if (this.state.initialBalance > 0 && (newBalance - this.state.initialBalance) / this.state.initialBalance <= CONFIG.SESSION_DRAWDOWN_LOCK) {
-      this.cooldownUntil = Math.max(this.cooldownUntil, exitTime + CONFIG.DRAWDOWN_RECOVERY_MS);
+      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + CONFIG.DRAWDOWN_RECOVERY_MS);
       this.emit({ performanceGuardText: '2% drawdown hit • 15-min auto recovery pause' });
       this.log('DRAWDOWN PAUSE • Session drawdown reached 2% • 15-minute auto-resume');
     }
     if (!this.needsSymbolFeed(p.symbol)) { this.sockets.get(p.symbol)?.close(); this.sockets.delete(p.symbol); }
-    if (!this.autoEntriesEnabled && !this.needsAnyFeed()) this.releaseWakeLock();
-    this.persistNow();
+    if (this.state.botStatus === 'STOPPED' && !this.state.activePositions.length) this.releaseWakeLock();
   }
 
-  applyPerformanceGuard(baseTime = Date.now()) {
+  applyPerformanceGuard() {
     const session = this.snapshot().sessionTrades;
     if (session.length < 8 || session.length - this.lastPerformanceGuardTradeCount < 4) return;
     const pf = this.profitFactor(session.slice(0, 8).map((t) => t.netPnl));
     if (pf < 0.80) {
       this.lastPerformanceGuardTradeCount = session.length;
-      this.refreshShadowStatsAndMode(true, baseTime);
-      this.cooldownUntil = Math.max(this.cooldownUntil, Number(baseTime) + CONFIG.PERFORMANCE_COOLDOWN_MS);
+      this.refreshShadowStatsAndMode(true);
+      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + CONFIG.PERFORMANCE_COOLDOWN_MS);
       this.emit({ performanceGuardText: `Recent PF ${pf.toFixed(2)} • 10-min protection` });
       this.log(`PERFORMANCE GUARD • last 8 PF ${pf.toFixed(2)} • 10-minute cooldown`);
     }

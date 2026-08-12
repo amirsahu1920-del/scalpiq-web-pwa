@@ -1,3 +1,6 @@
+export const APP_VERSION = '1.4.0';
+export const UPDATE_NAME = 'ScalpIQ – High Quality Market Filter Update';
+
 export const CONFIG = Object.freeze({
   REST_DIRECT: 'https://fapi.binance.com',
   REST_PROXY: '/api/binance',
@@ -26,12 +29,15 @@ export const DEFAULT_SETTINGS = Object.freeze({
 
   // Scanner / entry
   scanIntervalSeconds: 12,
-  quoteVolumeMinMillions: 20,
-  maxScanSymbols: 7,
-  confidenceMin: 72,
-  maxSpreadPct: 0.12,
-  strictLiquidityMode: false,
-  multiConfirmMode: false,
+  quoteVolumeMinMillions: 100,
+  maxScanSymbols: 12,
+  confidenceMin: 80,
+  maxSpreadPct: 0.06,
+  volatilityFilterEnabled: true,
+  minVolatility5mPct: 0.35,
+  maxSafeVolatilityPct: 2.50,
+  strictLiquidityMode: true,
+  multiConfirmMode: true,
   deadMarketGuardEnabled: true,
   highVolatilityGuardEnabled: true,
   spreadProtectionEnabled: true,
@@ -67,6 +73,8 @@ const oneOf = (v, allowed, fallback) => allowed.includes(v) ? v : fallback;
 
 export function normalizeSettings(value = {}) {
   const d = DEFAULT_SETTINGS;
+  const minVolatility5mPct = clamp(n(value.minVolatility5mPct, d.minVolatility5mPct), 0.10, 2.00);
+  const maxSafeVolatilityPct = Math.max(minVolatility5mPct + 0.05, clamp(n(value.maxSafeVolatilityPct, d.maxSafeVolatilityPct), 0.50, 10.00));
   return {
     themeMode: oneOf(value.themeMode, ['DARK', 'AMOLED', 'SYSTEM'], d.themeMode),
     compactMode: bool(value.compactMode, d.compactMode),
@@ -85,11 +93,14 @@ export function normalizeSettings(value = {}) {
     shadowExitPolicy: oneOf(value.shadowExitPolicy, ['TP_SL_ONLY', 'TP_SL_TIMEOUT'], d.shadowExitPolicy),
     shadowTimeoutMinutes: clamp(n(value.shadowTimeoutMinutes, d.shadowTimeoutMinutes), 2, 1440),
 
-    scanIntervalSeconds: clamp(n(value.scanIntervalSeconds, d.scanIntervalSeconds), 5, 120),
-    quoteVolumeMinMillions: clamp(n(value.quoteVolumeMinMillions, d.quoteVolumeMinMillions), 1, 1000),
-    maxScanSymbols: Math.round(clamp(n(value.maxScanSymbols, d.maxScanSymbols), 3, 25)),
-    confidenceMin: clamp(n(value.confidenceMin, d.confidenceMin), 50, 98),
-    maxSpreadPct: clamp(n(value.maxSpreadPct, d.maxSpreadPct), 0.01, 1.0),
+    scanIntervalSeconds: clamp(n(value.scanIntervalSeconds, d.scanIntervalSeconds), 5, 60),
+    quoteVolumeMinMillions: clamp(n(value.quoteVolumeMinMillions, d.quoteVolumeMinMillions), 20, 1000),
+    maxScanSymbols: Math.round(clamp(n(value.maxScanSymbols, d.maxScanSymbols), 5, 30)),
+    confidenceMin: clamp(n(value.confidenceMin, d.confidenceMin), 50, 95),
+    maxSpreadPct: clamp(n(value.maxSpreadPct, d.maxSpreadPct), 0.02, 0.20),
+    volatilityFilterEnabled: bool(value.volatilityFilterEnabled, d.volatilityFilterEnabled),
+    minVolatility5mPct,
+    maxSafeVolatilityPct,
     strictLiquidityMode: bool(value.strictLiquidityMode, d.strictLiquidityMode),
     multiConfirmMode: bool(value.multiConfirmMode, d.multiConfirmMode),
     deadMarketGuardEnabled: bool(value.deadMarketGuardEnabled, d.deadMarketGuardEnabled),

@@ -1,6 +1,6 @@
 import { SIDE, MODE } from './config.js';
 import { BinanceMarketClient } from './api.js';
-import { analyze, createPosition, bookFromDepth } from './strategy.js';
+import { analyze, createPosition, bookFromDepth, depthLiquidity } from './strategy.js';
 import { SessionStore, SettingsStore, TradeStore } from './store.js';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -383,7 +383,7 @@ export class TradingEngine {
       }
 
       try {
-        this.emit({ botStatus: 'SCANNING', statusText: 'Market + regime + signal scan...' });
+        this.emit({ botStatus: 'SCANNING', statusText: 'High-quality market filter • liquidity + spread + 5m ATR + confirmation scan...' });
         await this.scanOnce(token);
         if (token !== this.scanToken || !this.autoEntriesEnabled) return;
         this.emit({ feedConnected: true, botStatus: 'RUNNING', statusText: this.settings.shadowLearningEnabled ? `AUTO ${this.executionMode} • shadow A/B evidence active` : `AUTO ${this.executionMode} • fixed mode policy` });
@@ -401,63 +401,100 @@ export class TradingEngine {
     const started = Date.now();
     const tickers = await this.market.tickers24h();
     if (token !== this.scanToken) return;
-    const all = tickers
+
+    // Stage 1-2: active USDT perpetual market + real 24h quote-volume gate.
+    const active = tickers
       .filter((t) => this.symbols.has(t.symbol))
-      .filter((t) => t.quoteVolume >= this.settings.quoteVolumeMinMillions * 1_000_000)
-      .filter((t) => !t.symbol.startsWith('USDCUSDT'))
+      .filter((t) => !t.symbol.startsWith('USDCUSDT'));
+    const minQuote = this.settings.quoteVolumeMinMillions * 1_000_000;
+    const volumeRejected = active.filter((t) => Number(t.quoteVolume || 0) < minQuote).length;
+    const preselected = active
+      .filter((t) => Number(t.quoteVolume || 0) >= minQuote)
       .map((t) => {
-        const liquidity = Math.min(25, Math.log(1 + t.quoteVolume));
-        const motion = Math.min(18, Math.abs(t.priceChangePercent));
-        return { t, score: liquidity * 2.1 + motion * 1.7 };
+        // Pre-ranking is deliberately conservative: liquidity/volume first, 24h motion only a small tiebreaker.
+        // Final selection happens later using spread, depth, 5m ATR, confirmation and confidence.
+        const volumeScore = Math.min(30, Math.log10(1 + Number(t.quoteVolume || 0)) * 3.1);
+        const motionScore = Math.min(6, Math.abs(Number(t.priceChangePercent || 0)) * 0.7);
+        return { t, score: volumeScore + motionScore };
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, this.settings.maxScanSymbols)
       .map((x) => x.t);
 
+    if (volumeRejected > 0) {
+      this.log(`FILTER • Low 24h Volume: ${volumeRejected} markets below ${this.settings.quoteVolumeMinMillions.toFixed(0)}M USDT`);
+      active.filter((t) => Number(t.quoteVolume || 0) < minQuote)
+        .sort((a, b) => Number(b.quoteVolume || 0) - Number(a.quoteVolume || 0))
+        .slice(0, 3)
+        .forEach((t) => this.log(`REJECT ${t.symbol} • Low 24h Volume`));
+    }
+
     const raw = [];
-    for (const ticker of all) {
+    for (const ticker of preselected) {
       if (token !== this.scanToken) return;
       try {
+        // 5m candles are required by the new ATR quality filter/high-volatility guard even when
+        // the optional 5m direction confirmation itself is disabled.
+        const need5m = this.settings.multiConfirmMode || this.settings.volatilityFilterEnabled || this.settings.highVolatilityGuardEnabled;
         const requests = [this.market.klines(ticker.symbol, '1m', 120), this.market.depth(ticker.symbol, 20)];
-        if (this.settings.multiConfirmMode) requests.push(this.market.klines(ticker.symbol, '5m', 80));
+        if (need5m) requests.push(this.market.klines(ticker.symbol, '5m', 80));
         const [candles, depth, confirmCandles = null] = await Promise.all(requests);
         const book = bookFromDepth(depth);
         const a = analyze(ticker, candles, book, depth, this.settings, confirmCandles);
         if (a) raw.push(a);
       } catch (e) {
+        // One failed market must never freeze the whole scanner.
         this.log(`SCAN SKIP ${ticker.symbol} • ${e.message}`);
       }
     }
 
     const analyses = raw.map((a) => {
-      // Entry confidence must stay tied to the CURRENT market setup.
-      // Do not feed recent session win-rate back into the signal score: after ~10 trades
-      // a weak/short sample could crush a valid 90% raw setup to ~50% and silently stop entries.
-      // Shadow A/B performance still learns independently and selects NORMAL/INVERSE execution mode.
+      // Entry confidence stays tied to CURRENT market structure; session win-rate never crushes it.
       const marketConfidence = this.calibratedConfidence(a.signal.confidence);
-      const accepted = a.signal.accepted;
       const signal = {
-        ...a.signal, confidence: marketConfidence, accepted,
-        rejectionReason: a.signal.rejectionReason,
-        reasons: [...a.signal.reasons, `Market confidence ${marketConfidence.toFixed(1)}%`].slice(0, 7),
+        ...a.signal,
+        confidence: marketConfidence,
+        accepted: a.signal.accepted && marketConfidence >= this.settings.confidenceMin,
+        rejectionReason: a.signal.accepted && marketConfidence < this.settings.confidenceMin
+          ? 'Confidence Below Minimum'
+          : a.signal.rejectionReason,
+        reasons: [...a.signal.reasons, `Market confidence ${marketConfidence.toFixed(1)}%`].slice(0, 9),
       };
+      const quality = Number(a.candidate.score || signal.qualityScore || marketConfidence);
       return {
         signal,
-        candidate: { ...a.candidate, score: marketConfidence, note: accepted ? a.candidate.note : (signal.rejectionReason || a.candidate.note) },
+        candidate: {
+          ...a.candidate,
+          score: quality,
+          confidence: marketConfidence,
+          note: signal.accepted ? a.candidate.note : (signal.rejectionReason || a.candidate.note),
+        },
       };
     });
 
-    const candidates = analyses.map((a) => a.candidate).sort((a, b) => b.score - a.score).slice(0, 7);
-    const newSignals = analyses.map((a) => a.signal).sort((a, b) => b.confidence - a.confidence);
-    const signals = [...newSignals, ...this.state.signals].filter((s, i, arr) => arr.findIndex((x) => x.id === s.id) === i).slice(0, 120);
+    // Accepted markets are shown first by final quality; rejected markets remain visible with a reason for debugging.
+    const rankedAnalyses = [...analyses].sort((a, b) =>
+      Number(b.signal.accepted) - Number(a.signal.accepted) || Number(b.candidate.score || 0) - Number(a.candidate.score || 0));
+    const candidates = rankedAnalyses.map((a) => a.candidate).slice(0, 7);
+    const newSignals = analyses.map((a) => a.signal).sort((a, b) => Number(b.qualityScore || b.confidence) - Number(a.qualityScore || a.confidence));
+    const signals = [...newSignals, ...this.state.signals].filter((sig, i, arr) => arr.findIndex((x) => x.id === sig.id) === i).slice(0, 120);
     this.emit({ candidates, signals, latencyMs: Date.now() - started });
 
+    analyses.filter((a) => !a.signal.accepted && a.signal.rejectionReason)
+      .sort((a, b) => Number(b.candidate.score || 0) - Number(a.candidate.score || 0))
+      .slice(0, 5)
+      .forEach((a) => this.log(`REJECT ${a.signal.symbol} • ${a.signal.rejectionReason}`));
+
+    // Final Quality Ranking: never pick the first available coin or the most volatile coin blindly.
     const best = analyses
       .filter((a) => a.signal.accepted)
       .filter((a) => !this.state.activePositions.some((p) => p.symbol === a.signal.symbol))
-      .sort((a, b) => b.signal.confidence - a.signal.confidence)[0];
+      .sort((a, b) => Number(b.candidate.score || 0) - Number(a.candidate.score || 0))[0];
     if (best && this.state.activePositions.length < this.settings.maxOpenPositions) await this.openPaperPosition(best.signal);
-    else if (!best && candidates.length) this.log(`NO TRADE • Best ${candidates[0].symbol} confidence ${candidates[0].score.toFixed(1)}`);
+    else if (!best && candidates.length) {
+      const c = candidates[0];
+      this.log(`NO TRADE • Best ${c.symbol} • ${c.note} • confidence ${Number(c.confidence || 0).toFixed(1)}% • quality ${Number(c.score || 0).toFixed(1)}`);
+    }
   }
 
   calibratedConfidence(raw) {
@@ -474,10 +511,14 @@ export class TradingEngine {
     if (Date.now() < this.cooldownUntil) return;
     const depth = await this.market.depth(signal.symbol, 20);
     const book = bookFromDepth(depth);
-    if (this.settings.spreadProtectionEnabled && book.spreadPct > this.settings.maxSpreadPct) {
-      this.log(`REJECT ${signal.symbol} • spread protection`);
-      return;
-    }
+    const liquidity = depthLiquidity(depth);
+    if (Number(signal.quoteVolume || 0) < this.settings.quoteVolumeMinMillions * 1_000_000) { this.log(`REJECT ${signal.symbol} • Low 24h Volume`); return; }
+    if (this.settings.spreadProtectionEnabled && book.spreadPct > this.settings.maxSpreadPct) { this.log(`REJECT ${signal.symbol} • Spread Too Wide`); return; }
+    if (this.settings.strictLiquidityMode && (book.spreadPct > this.settings.maxSpreadPct || liquidity.totalQuote < 30_000 || liquidity.minSideQuote < 10_000)) { this.log(`REJECT ${signal.symbol} • Low Liquidity`); return; }
+    if (this.settings.volatilityFilterEnabled && Number(signal.atr5mPct || 0) < this.settings.minVolatility5mPct) { this.log(`REJECT ${signal.symbol} • Low Volatility`); return; }
+    if (this.settings.highVolatilityGuardEnabled && (signal.regime === 'HIGH_VOLATILITY' || Number(signal.atr5mPct || 0) > this.settings.maxSafeVolatilityPct)) { this.log(`REJECT ${signal.symbol} • Extreme Volatility`); return; }
+    if (this.settings.multiConfirmMode && signal.confirm5m === false) { this.log(`REJECT ${signal.symbol} • 5m Confirmation Failed`); return; }
+    if (Number(signal.confidence || 0) < this.settings.confidenceMin) { this.log(`REJECT ${signal.symbol} • Confidence Below Minimum`); return; }
     const equity = this.state.realizedBalance + this.state.unrealizedPnl;
     const normalPlan = createPosition(signal, book, equity, MODE.NORMAL, this.settings);
     const inversePlan = createPosition(signal, book, equity, MODE.INVERSE, this.settings);

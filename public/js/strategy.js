@@ -22,6 +22,38 @@ export function orderBookImbalance(depth) {
   return b + a === 0 ? 0.5 : b / (b + a);
 }
 
+export function depthLiquidity(depth) {
+  const bidQuote = (depth.bids || []).reduce((s, row) => s + Number(row[0] || 0) * Number(row[1] || 0), 0);
+  const askQuote = (depth.asks || []).reduce((s, row) => s + Number(row[0] || 0) * Number(row[1] || 0), 0);
+  return { bidQuote, askQuote, totalQuote: bidQuote + askQuote, minSideQuote: Math.min(bidQuote, askQuote) };
+}
+
+function healthyVolatilityScore(atrPct, minPct, maxPct) {
+  if (!(atrPct > 0)) return 0;
+  if (atrPct < minPct) return clamp((atrPct / Math.max(minPct, 0.0001)) * 45, 0, 45);
+  if (atrPct > maxPct) return clamp(40 - ((atrPct - maxPct) / Math.max(maxPct, 0.0001)) * 80, 0, 40);
+  const span = Math.max(0.05, maxPct - minPct);
+  const target = minPct + span * 0.35; // healthy movement, not the most explosive coin.
+  const distance = Math.abs(atrPct - target) / span;
+  return clamp(100 - distance * 70, 55, 100);
+}
+
+function qualityScore({ confidence, quoteVolume, minQuoteVolume, spreadPct, maxSpreadPct, atr5mPct, minVolPct, maxVolPct, liquidity, confirmOk, confirmRequired }) {
+  const volumeRatio = quoteVolume / Math.max(1, minQuoteVolume);
+  const volumeQuality = clamp(55 + Math.log10(Math.max(0.01, volumeRatio)) * 25, 0, 100);
+  const spreadQuality = maxSpreadPct > 0 ? clamp(100 * (1 - spreadPct / maxSpreadPct), 0, 100) : 0;
+  const depthScale = Math.log10(1 + Math.max(0, liquidity.totalQuote));
+  const sideScale = Math.log10(1 + Math.max(0, liquidity.minSideQuote));
+  const liquidityQuality = clamp((depthScale / 6.2) * 55 + (sideScale / 5.5) * 45, 0, 100);
+  const volatilityQuality = healthyVolatilityScore(atr5mPct, minVolPct, maxVolPct);
+  const confirmationQuality = confirmRequired ? (confirmOk ? 100 : 0) : 85;
+  return clamp(
+    confidence * 0.52 + volumeQuality * 0.10 + liquidityQuality * 0.13 +
+    spreadQuality * 0.10 + volatilityQuality * 0.10 + confirmationQuality * 0.05,
+    0, 100,
+  );
+}
+
 export function analyze(ticker, candles, book, depth, userSettings = DEFAULT_SETTINGS, confirmCandles = null) {
   const settings = normalizeSettings(userSettings);
   if (!candles || candles.length < 60 || book.mid <= 0) return null;
@@ -33,6 +65,8 @@ export function analyze(ticker, candles, book, depth, userSettings = DEFAULT_SET
   const rsi = I.rsi(closes, 14);
   const atr = I.atr(candles, 14);
   const atrPct = price > 0 ? (atr / price) * 100 : 0;
+  const atr5m = confirmCandles?.length >= 20 ? I.atr(confirmCandles, 14) : 0;
+  const atr5mPct = price > 0 && atr5m > 0 ? (atr5m / price) * 100 : 0;
   const vw = I.vwap(candles, 30);
   const volRatio = I.volumeRatio(candles, 20);
   const mom3 = I.momentum(closes, 3);
@@ -40,9 +74,10 @@ export function analyze(ticker, candles, book, depth, userSettings = DEFAULT_SET
   const high20 = prev20.length ? Math.max(...prev20.map((c) => c.high)) : price;
   const low20 = prev20.length ? Math.min(...prev20.map((c) => c.low)) : price;
   const imb = orderBookImbalance(depth);
+  const liquidity = depthLiquidity(depth);
 
   let regime;
-  if (atrPct > 2.0) regime = REGIME.HIGH_VOLATILITY;
+  if (atrPct > 2.0) regime = REGIME.HIGH_VOLATILITY; // preserve existing 1m shock detector.
   else if (volRatio < 0.45 && Math.abs(ticker.priceChangePercent) < 0.8) regime = REGIME.DEAD;
   else if (price > high20 && volRatio > 1.15) regime = REGIME.BREAKOUT;
   else if (price < low20 && volRatio > 1.15) regime = REGIME.BREAKOUT;
@@ -91,37 +126,64 @@ export function analyze(ticker, candles, book, depth, userSettings = DEFAULT_SET
       const c9 = I.ema(cc, 9);
       const c21 = I.ema(cc, 21);
       confirmOk = side === SIDE.LONG ? c9 >= c21 : c9 <= c21;
-      if (confirmOk) reasons.push('5m trend confirmed');
+      if (confirmOk) reasons.push('5m structure confirmed');
     }
   }
 
-  const strictLiquidityOk = !settings.strictLiquidityMode || (
-    Number(ticker.quoteVolume || 0) >= Math.max(settings.quoteVolumeMinMillions * 1_000_000, 50_000_000)
-    && book.spreadPct <= Math.min(settings.maxSpreadPct, 0.08)
-    && Math.abs(imb - 0.5) >= 0.02
-  );
-  const deadOk = !settings.deadMarketGuardEnabled || regime !== REGIME.DEAD;
-  const volatilityOk = !settings.highVolatilityGuardEnabled || regime !== REGIME.HIGH_VOLATILITY;
+  const minQuoteVolume = settings.quoteVolumeMinMillions * 1_000_000;
+  const volumeOk = Number(ticker.quoteVolume || 0) >= minQuoteVolume;
   const spreadOk = !settings.spreadProtectionEnabled || book.spreadPct <= settings.maxSpreadPct;
+  const strictLiquidityOk = !settings.strictLiquidityMode || (
+    volumeOk &&
+    book.spreadPct <= settings.maxSpreadPct &&
+    liquidity.totalQuote >= 30_000 && liquidity.minSideQuote >= 10_000
+  );
+  const minVolatilityOk = !settings.volatilityFilterEnabled || (atr5mPct > 0 && atr5mPct >= settings.minVolatility5mPct);
+  const deadOk = !settings.deadMarketGuardEnabled || regime !== REGIME.DEAD;
+  const extremeVolatility = regime === REGIME.HIGH_VOLATILITY || (atr5mPct > 0 && atr5mPct > settings.maxSafeVolatilityPct);
+  const highVolatilityOk = !settings.highVolatilityGuardEnabled || !extremeVolatility;
   const confidenceOk = confidence >= settings.confidenceMin;
-  const accepted = confidenceOk && spreadOk && deadOk && volatilityOk && strictLiquidityOk && confirmOk;
 
+  const qScore = qualityScore({
+    confidence,
+    quoteVolume: Number(ticker.quoteVolume || 0),
+    minQuoteVolume,
+    spreadPct: book.spreadPct,
+    maxSpreadPct: settings.maxSpreadPct,
+    atr5mPct: atr5mPct || settings.minVolatility5mPct,
+    minVolPct: settings.minVolatility5mPct,
+    maxVolPct: settings.maxSafeVolatilityPct,
+    liquidity,
+    confirmOk,
+    confirmRequired: settings.multiConfirmMode,
+  });
+
+  // Rejection priority mirrors the High Quality scanner pipeline.
   let rejectionReason = null;
-  if (!deadOk) rejectionReason = 'Dead/low-volume market';
-  else if (!volatilityOk) rejectionReason = 'Market shock guard';
-  else if (!confidenceOk) rejectionReason = `Confidence below ${settings.confidenceMin.toFixed(0)}%`;
-  else if (!spreadOk) rejectionReason = 'Spread protection';
-  else if (!strictLiquidityOk) rejectionReason = 'Strict liquidity filter';
-  else if (!confirmOk) rejectionReason = '5m confirmation missing';
+  if (!volumeOk) rejectionReason = 'Low 24h Volume';
+  else if (!spreadOk) rejectionReason = 'Spread Too Wide';
+  else if (!strictLiquidityOk) rejectionReason = 'Low Liquidity';
+  else if (!minVolatilityOk) rejectionReason = 'Low Volatility';
+  else if (!deadOk) rejectionReason = 'Dead Market';
+  else if (!highVolatilityOk) rejectionReason = 'Extreme Volatility';
+  else if (!confirmOk) rejectionReason = '5m Confirmation Failed';
+  else if (!confidenceOk) rejectionReason = 'Confidence Below Minimum';
+
+  const accepted = rejectionReason === null;
+  if (atr5mPct > 0) reasons.push(`5m ATR ${atr5mPct.toFixed(2)}%`);
+  if (accepted) reasons.push(`Quality ${qScore.toFixed(0)}`);
 
   const signal = {
     id: uid(), symbol: ticker.symbol, side, confidence, regime, strategy, price, atr,
-    spreadPct: book.spreadPct, orderBookImbalance: imb, reasons: reasons.slice(0, 7), createdAt: Date.now(),
+    atr5mPct, quoteVolume: Number(ticker.quoteVolume || 0), qualityScore: qScore,
+    depthQuote: liquidity.totalQuote, spreadPct: book.spreadPct, orderBookImbalance: imb,
+    confirm5m: confirmOk, reasons: reasons.slice(0, 9), createdAt: Date.now(),
     accepted, rejectionReason,
   };
   const candidate = {
-    symbol: ticker.symbol, side, score: confidence, regime, price, spreadPct: book.spreadPct,
-    note: accepted ? reasons.slice(0, 3).join(' • ') : (rejectionReason || 'Filtered'),
+    symbol: ticker.symbol, side, score: qScore, confidence, regime, price, spreadPct: book.spreadPct,
+    atr5mPct, quoteVolume: Number(ticker.quoteVolume || 0), liquidityQuote: liquidity.totalQuote,
+    note: accepted ? `${strategy} • Q${qScore.toFixed(0)}` : rejectionReason,
   };
   return { signal, candidate };
 }

@@ -1,4 +1,5 @@
 import { UiStore } from './store.js';
+import { APP_VERSION, UPDATE_NAME } from './config.js';
 
 const $ = (s) => document.querySelector(s);
 const money = (v) => `$${Number(v || 0).toFixed(2)}`;
@@ -115,7 +116,7 @@ export class AppUI {
       <section class="metrics"><div class="metric"><span>EQUITY</span><b class="${s.totalNetPnl >= 0 ? 'green' : 'red'}">${money(s.equity)}</b></div><div class="metric"><span>NET P&amp;L</span><b class="${s.totalNetPnl >= 0 ? 'green' : 'red'}">${signed(s.totalNetPnl)}</b></div><div class="metric"><span>WIN RATE</span><b>${s.winRate.toFixed(1)}%</b></div><div class="metric"><span>PROFIT FACTOR</span><b>${s.profitFactor >= 99 ? '∞' : s.profitFactor.toFixed(2)}</b></div></section>
       ${s.sessionStartedAt ? `<section class="panel"><div class="section-row"><span class="eyebrow green">EXECUTION MODE</span><span class="tag green">${s.executionMode}</span></div><div class="two"><div><small>Normal shadow PF</small><b>${s.shadowNormalPf.toFixed(2)} (${s.shadowNormalSamples})</b></div><div><small>Inverse shadow PF</small><b>${s.shadowInversePf.toFixed(2)} (${s.shadowInverseSamples})</b></div></div><p class="hint">${esc(s.performanceGuardText)}</p></section>` : ''}
       ${s.activePositions.length ? `<h3 class="section-title">ACTIVE PAPER TRADES</h3>${s.activePositions.map((p) => this.activeCard(p)).join('')}` : ''}
-      ${settings.showResearch && s.candidates.length ? `<h3 class="section-title">AUTO RESEARCH • BEST SETUPS</h3>${s.candidates.slice(0,5).map((c) => this.candidateCard(c, settings.confidenceMin || 72)).join('')}` : ''}
+      ${settings.showResearch && s.candidates.length ? `<h3 class="section-title">AUTO RESEARCH • BEST SETUPS</h3>${s.candidates.slice(0,5).map((c) => this.candidateCard(c, settings.confidenceMin || 80)).join('')}` : ''}
       ${settings.showEngineLog && s.logs.length ? `<h3 class="section-title">ENGINE LOG</h3><section class="panel logs">${s.logs.slice(0,8).map((l) => `<div class="${/ERROR|LOSS|RISK|DRAWDOWN/.test(l) ? 'red' : ''}">${esc(l)}</div>`).join('')}</section>` : ''}
     `;
   }
@@ -126,7 +127,11 @@ export class AppUI {
   }
 
   candidateCard(c, minConfidence) {
-    return `<section class="panel candidate"><div class="trade-head"><strong>${c.symbol}</strong><div><span class="tag ${c.side === 'LONG' ? 'green' : 'red'}">${c.side || '--'}</span> <b class="${c.score >= minConfidence ? 'green' : ''}">${c.score.toFixed(1)}%</b></div></div><p class="hint">${esc(c.regime.replaceAll('_',' '))} • ${esc(c.note)}</p><p class="mini">Price ${price(c.price)} • spread ${c.spreadPct.toFixed(3)}%</p></section>`;
+    const confidence = Number(c.confidence ?? c.score ?? 0);
+    const quality = Number(c.score ?? 0);
+    const vol = Number(c.atr5mPct || 0);
+    const qvM = Number(c.quoteVolume || 0) / 1_000_000;
+    return `<section class="panel candidate"><div class="trade-head"><strong>${c.symbol}</strong><div><span class="tag ${c.side === 'LONG' ? 'green' : 'red'}">${c.side || '--'}</span> <b class="${confidence >= minConfidence ? 'green' : ''}">${confidence.toFixed(1)}%</b></div></div><p class="hint">${esc(c.regime.replaceAll('_',' '))} • ${esc(c.note)}</p><p class="mini">Quality ${quality.toFixed(1)} • 5m ATR ${vol > 0 ? vol.toFixed(2) + '%' : '--'} • Volume ${qvM >= 1000 ? (qvM/1000).toFixed(1)+'B' : qvM.toFixed(0)+'M'} • spread ${c.spreadPct.toFixed(3)}%</p></section>`;
   }
 
   tradesView(s) {
@@ -141,7 +146,7 @@ export class AppUI {
     const x = s.settings;
     const api = sessionStorage.getItem('scalpiq_api_key_draft') || '';
     const secret = sessionStorage.getItem('scalpiq_api_secret_draft') || '';
-    return `<section class="page-head"><div><h2>Settings</h2><p>Routine strategy, risk, session aur appearance controls — code update ke baghair.</p></div><span class="tag green">v1.3.0</span></section>
+    return `<section class="page-head"><div><h2>Settings</h2><p>${esc(UPDATE_NAME)} • routine strategy, risk, session aur appearance controls.</p></div><span class="tag green">v${esc(APP_VERSION)}</span></section>
       ${this.category('APPEARANCE',
         this.select('Theme', 'themeMode', x.themeMode, [['DARK','Dark'],['AMOLED','AMOLED Black'],['SYSTEM','Follow System']]) +
         this.toggle('Compact layout', 'compactMode', x.compactMode, 'Cards aur spacing compact kare.') +
@@ -161,16 +166,21 @@ export class AppUI {
         this.number('Shadow timeout', 'shadowTimeoutMinutes', x.shadowTimeoutMinutes, 2, 1440, 1, 'min • ignored in TP/SL-only mode') +
         this.toggle('Weak-shadow guard', 'weakShadowGuardEnabled', x.weakShadowGuardEnabled, 'Dono shadow modes weak hon to protective cooldown.'))}
       ${this.category('SCANNER & ENTRY',
-        this.number('Minimum confidence', 'confidenceMin', x.confidenceMin, 50, 98, 1, '%') +
-        this.number('Scan interval', 'scanIntervalSeconds', x.scanIntervalSeconds, 5, 120, 1, 'sec') +
-        this.number('Min 24h quote volume', 'quoteVolumeMinMillions', x.quoteVolumeMinMillions, 1, 1000, 1, 'M USDT') +
-        this.number('Coins per scan', 'maxScanSymbols', x.maxScanSymbols, 3, 25, 1, '') +
-        this.number('Max spread', 'maxSpreadPct', x.maxSpreadPct, 0.01, 1, 0.01, '%') +
-        this.toggle('Spread protection', 'spreadProtectionEnabled', x.spreadProtectionEnabled, 'Wide spread entries reject kare.') +
-        this.toggle('Dead-market guard', 'deadMarketGuardEnabled', x.deadMarketGuardEnabled, 'Dead/very low-volume regimes reject kare.') +
-        this.toggle('High-volatility guard', 'highVolatilityGuardEnabled', x.highVolatilityGuardEnabled, 'Market shock regime entries block kare.') +
-        this.toggle('Strict liquidity mode', 'strictLiquidityMode', x.strictLiquidityMode, 'Optional tighter liquidity/order-book gate.') +
-        this.toggle('5m multi-confirm', 'multiConfirmMode', x.multiConfirmMode, '1m signal ko 5m trend se confirm kare.'))}
+        `<div class="notice"><b>High Quality defaults:</b> 80% confidence • 12 sec • 100M USDT • 12 coins • 0.06% max spread.</div>` +
+        this.number('Minimum confidence', 'confidenceMin', x.confidenceMin, 50, 95, 1, '%') +
+        this.number('Scan interval', 'scanIntervalSeconds', x.scanIntervalSeconds, 5, 60, 1, 'sec') +
+        this.number('Min 24h quote volume', 'quoteVolumeMinMillions', x.quoteVolumeMinMillions, 20, 1000, 25, 'M USDT') +
+        this.number('Coins per scan', 'maxScanSymbols', x.maxScanSymbols, 5, 30, 1, '') +
+        this.number('Max spread', 'maxSpreadPct', x.maxSpreadPct, 0.02, 0.20, 0.01, '%') +
+        this.toggle('Spread protection', 'spreadProtectionEnabled', x.spreadProtectionEnabled, 'Reject Trade – Spread Too Wide.') +
+        this.toggle('Dead-market guard', 'deadMarketGuardEnabled', x.deadMarketGuardEnabled, 'Weak movement/activity ko independent dead-market check se reject kare.') +
+        this.toggle('Strict liquidity mode', 'strictLiquidityMode', x.strictLiquidityMode, '24h volume ke sath spread + top-20 order-book executable depth check kare.') +
+        this.toggle('5m multi-confirm', 'multiConfirmMode', x.multiConfirmMode, 'Existing 1m signal ko 5m EMA structure/momentum se confirm kare.'))}
+      ${this.category('VOLATILITY FILTER',
+        this.toggle('Volatility Filter', 'volatilityFilterEnabled', x.volatilityFilterEnabled, '5m ATR(14)% se slow/dead coins ko trade candidate banne se roke.') +
+        this.number('Minimum 5m Volatility', 'minVolatility5mPct', x.minVolatility5mPct, 0.10, 2.00, 0.05, '% ATR(14)') +
+        this.toggle('High-volatility guard', 'highVolatilityGuardEnabled', x.highVolatilityGuardEnabled, 'Existing market-shock detector + maximum safe 5m ATR threshold se extreme pump/dump block kare.') +
+        this.number('Maximum Safe Volatility', 'maxSafeVolatilityPct', x.maxSafeVolatilityPct, 0.50, 10.00, 0.10, '% 5m ATR(14)'))}
       ${this.category('POSITION & RISK',
         this.number('Max active positions', 'maxOpenPositions', x.maxOpenPositions, 1, 6, 1, '') +
         this.number('Position notional cap', 'positionNotionalCapPct', x.positionNotionalCapPct, 5, 100, 1, '% equity') +

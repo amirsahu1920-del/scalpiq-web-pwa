@@ -1,4 +1,4 @@
-import { CONFIG, SIDE, MODE, REGIME } from './config.js';
+import { DEFAULT_SETTINGS, SIDE, MODE, REGIME, normalizeSettings } from './config.js';
 import * as I from './indicators.js';
 
 const uid = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -9,15 +9,9 @@ export function bookFromDepth(depth) {
   const [ask = 0, askQty = 0] = depth.asks?.[0] || [];
   const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
   return {
-    symbol: depth.symbol,
-    bid,
-    bidQty,
-    ask,
-    askQty,
-    eventTime: depth.eventTime || Date.now(),
-    transactionTime: depth.transactionTime || Date.now(),
-    updateId: depth.lastUpdateId || 0,
-    mid,
+    symbol: depth.symbol, bid, bidQty, ask, askQty,
+    eventTime: depth.eventTime || Date.now(), transactionTime: depth.transactionTime || Date.now(),
+    updateId: depth.lastUpdateId || 0, mid,
     spreadPct: mid > 0 ? ((ask - bid) / mid) * 100 : 0,
   };
 }
@@ -28,7 +22,8 @@ export function orderBookImbalance(depth) {
   return b + a === 0 ? 0.5 : b / (b + a);
 }
 
-export function analyze(ticker, candles, book, depth) {
+export function analyze(ticker, candles, book, depth, userSettings = DEFAULT_SETTINGS, confirmCandles = null) {
+  const settings = normalizeSettings(userSettings);
   if (!candles || candles.length < 60 || book.mid <= 0) return null;
   const closes = candles.map((c) => c.close);
   const price = book.mid;
@@ -59,13 +54,9 @@ export function analyze(ticker, candles, book, depth) {
   let short = 0;
   const longReasons = [];
   const shortReasons = [];
-
-  if (ema9 > ema21) { long += 16; longReasons.push('EMA 9 > EMA 21'); }
-  else { short += 16; shortReasons.push('EMA 9 < EMA 21'); }
-  if (ema21 > ema50) { long += 12; longReasons.push('1m trend bullish'); }
-  else { short += 12; shortReasons.push('1m trend bearish'); }
-  if (price > vw) { long += 10; longReasons.push('Price above VWAP'); }
-  else { short += 10; shortReasons.push('Price below VWAP'); }
+  if (ema9 > ema21) { long += 16; longReasons.push('EMA 9 > EMA 21'); } else { short += 16; shortReasons.push('EMA 9 < EMA 21'); }
+  if (ema21 > ema50) { long += 12; longReasons.push('1m trend bullish'); } else { short += 12; shortReasons.push('1m trend bearish'); }
+  if (price > vw) { long += 10; longReasons.push('Price above VWAP'); } else { short += 10; shortReasons.push('Price below VWAP'); }
   if (rsi >= 52 && rsi <= 72) { long += 10; longReasons.push(`RSI momentum ${Math.trunc(rsi)}`); }
   if (rsi >= 28 && rsi <= 48) { short += 10; shortReasons.push(`RSI momentum ${Math.trunc(rsi)}`); }
   if (mom3 > 0.08) { long += 10; longReasons.push(`3-bar momentum +${mom3.toFixed(2)}%`); }
@@ -82,7 +73,7 @@ export function analyze(ticker, candles, book, depth) {
   if (ticker.priceChangePercent < -0.5) short += 6;
 
   if (regime === REGIME.HIGH_VOLATILITY || regime === REGIME.DEAD) { long *= 0.72; short *= 0.72; }
-  if (book.spreadPct > CONFIG.MAX_SPREAD_PCT) { long *= 0.70; short *= 0.70; }
+  if (settings.spreadProtectionEnabled && book.spreadPct > settings.maxSpreadPct) { long *= 0.70; short *= 0.70; }
 
   const side = long >= short ? SIDE.LONG : SIDE.SHORT;
   const raw = Math.max(long, short);
@@ -92,47 +83,64 @@ export function analyze(ticker, candles, book, depth) {
     : (regime === REGIME.TREND_UP || regime === REGIME.TREND_DOWN) ? 'Trend Pullback + Momentum'
       : regime === REGIME.RANGE ? 'VWAP Range Filter' : 'Adaptive Momentum';
 
-  // Latest Android behavior: strict-liquidity and multi-confirm entry modes are OFF.
-  const accepted = confidence >= CONFIG.CONFIDENCE_MIN
-    && book.spreadPct <= CONFIG.MAX_SPREAD_PCT
-    && regime !== REGIME.DEAD
-    && regime !== REGIME.HIGH_VOLATILITY;
+  let confirmOk = true;
+  if (settings.multiConfirmMode) {
+    if (!confirmCandles || confirmCandles.length < 30) confirmOk = false;
+    else {
+      const cc = confirmCandles.map((c) => c.close);
+      const c9 = I.ema(cc, 9);
+      const c21 = I.ema(cc, 21);
+      confirmOk = side === SIDE.LONG ? c9 >= c21 : c9 <= c21;
+      if (confirmOk) reasons.push('5m trend confirmed');
+    }
+  }
+
+  const strictLiquidityOk = !settings.strictLiquidityMode || (
+    Number(ticker.quoteVolume || 0) >= Math.max(settings.quoteVolumeMinMillions * 1_000_000, 50_000_000)
+    && book.spreadPct <= Math.min(settings.maxSpreadPct, 0.08)
+    && Math.abs(imb - 0.5) >= 0.02
+  );
+  const deadOk = !settings.deadMarketGuardEnabled || regime !== REGIME.DEAD;
+  const volatilityOk = !settings.highVolatilityGuardEnabled || regime !== REGIME.HIGH_VOLATILITY;
+  const spreadOk = !settings.spreadProtectionEnabled || book.spreadPct <= settings.maxSpreadPct;
+  const confidenceOk = confidence >= settings.confidenceMin;
+  const accepted = confidenceOk && spreadOk && deadOk && volatilityOk && strictLiquidityOk && confirmOk;
+
   let rejectionReason = null;
-  if (regime === REGIME.DEAD) rejectionReason = 'Dead/low-volume market';
-  else if (regime === REGIME.HIGH_VOLATILITY) rejectionReason = 'Market shock guard';
-  else if (confidence < CONFIG.CONFIDENCE_MIN) rejectionReason = 'Confidence below 72%';
-  else if (book.spreadPct > CONFIG.MAX_SPREAD_PCT) rejectionReason = 'Spread protection';
+  if (!deadOk) rejectionReason = 'Dead/low-volume market';
+  else if (!volatilityOk) rejectionReason = 'Market shock guard';
+  else if (!confidenceOk) rejectionReason = `Confidence below ${settings.confidenceMin.toFixed(0)}%`;
+  else if (!spreadOk) rejectionReason = 'Spread protection';
+  else if (!strictLiquidityOk) rejectionReason = 'Strict liquidity filter';
+  else if (!confirmOk) rejectionReason = '5m confirmation missing';
 
   const signal = {
     id: uid(), symbol: ticker.symbol, side, confidence, regime, strategy, price, atr,
-    spreadPct: book.spreadPct, orderBookImbalance: imb, reasons, createdAt: Date.now(),
+    spreadPct: book.spreadPct, orderBookImbalance: imb, reasons: reasons.slice(0, 7), createdAt: Date.now(),
     accepted, rejectionReason,
   };
   const candidate = {
-    symbol: ticker.symbol,
-    side: accepted ? side : null,
-    score: confidence,
-    regime,
-    price,
-    spreadPct: book.spreadPct,
+    symbol: ticker.symbol, side, score: confidence, regime, price, spreadPct: book.spreadPct,
     note: accepted ? reasons.slice(0, 3).join(' • ') : (rejectionReason || 'Filtered'),
   };
   return { signal, candidate };
 }
 
-export function createPosition(signal, book, equity, mode) {
+export function createPosition(signal, book, equity, mode, userSettings = DEFAULT_SETTINGS) {
+  const settings = normalizeSettings(userSettings);
   if (equity <= 0 || book.bid <= 0 || book.ask <= 0) return null;
   const rawStopPct = signal.price > 0 ? (signal.atr * 1.20) / signal.price : 0.005;
   const stopPct = clamp(rawStopPct, 0.0025, 0.0100);
   const dynamicSlip = clamp(Math.max(0.00004, (book.spreadPct / 100) * 0.30), 0, 0.0006);
   const entry = signal.side === SIDE.LONG ? book.ask * (1 + dynamicSlip) : book.bid * (1 - dynamicSlip);
   const executedSide = mode === MODE.NORMAL ? signal.side : (signal.side === SIDE.LONG ? SIDE.SHORT : SIDE.LONG);
-  const roundTripCostRate = (CONFIG.PAPER_TAKER_FEE_RATE * 2) + (dynamicSlip * 2);
-  const riskDollars = equity * CONFIG.RISK_BUDGET_PCT;
+  const feeRate = settings.paperTakerFeePct / 100;
+  const roundTripCostRate = (feeRate * 2) + (dynamicSlip * 2);
+  const riskDollars = equity * (settings.riskBudgetPct / 100);
   const lossRateAtStop = stopPct + roundTripCostRate;
-  const maxNotional = Math.max(1, equity * CONFIG.POSITION_NOTIONAL_CAP);
+  const maxNotional = Math.max(1, equity * (settings.positionNotionalCapPct / 100));
   const minNotional = Math.min(5, maxNotional);
-  const notional = clamp(riskDollars / lossRateAtStop, minNotional, maxNotional);
+  const notional = clamp(riskDollars / Math.max(lossRateAtStop, 0.000001), minNotional, maxNotional);
   const stopDistance = entry * stopPct;
   const stop = executedSide === SIDE.LONG ? entry - stopDistance : entry + stopDistance;
   const targetR = signal.regime === REGIME.BREAKOUT ? 1.80
@@ -146,8 +154,7 @@ export function createPosition(signal, book, equity, mode) {
     confidence: signal.confidence, entryPrice: entry, entryTime: Date.now(),
     entryEventTime: book.eventTime, entryTransactionTime: book.transactionTime, entryUpdateId: book.updateId,
     initialStop: stop, stopPrice: stop, tp1, quantity: notional / entry, notional,
-    virtualLeverage: CONFIG.VIRTUAL_LEVERAGE, feeRate: CONFIG.PAPER_TAKER_FEE_RATE,
-    slippageRate: dynamicSlip, analyzedSide: signal.side, executionMode: mode, lastPrice: entry,
-    lastObservedAt: Date.now(),
+    virtualLeverage: settings.virtualLeverage, feeRate, slippageRate: dynamicSlip,
+    analyzedSide: signal.side, executionMode: mode, lastPrice: entry, lastObservedAt: Number(book.eventTime || Date.now()),
   };
 }

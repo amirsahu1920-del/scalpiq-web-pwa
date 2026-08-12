@@ -3,8 +3,8 @@ import { AppUI } from './js/ui.js';
 
 let ui = null;
 const engine = new TradingEngine((state) => {
-  // Avoid wiping a field while the user is typing on the API screen.
-  if (ui?.tab === 'api' && document.activeElement?.matches('input')) return;
+  // Settings/API number/text fields should not be destroyed while the user is typing.
+  if (ui?.tab === 'settings' && document.activeElement?.matches('input,select')) return;
   ui?.render(state);
 });
 ui = new AppUI(engine);
